@@ -93,7 +93,7 @@ def generate_launch_description():
             description="Number of topomap nodes to consider for localization"),
         DeclareLaunchArgument("num_samples", default_value="8",
             description="Number of diffusion action samples"),
-        DeclareLaunchArgument("image_topic", default_value="/camera/image_raw",
+        DeclareLaunchArgument("image_topic", default_value="/camera/color/image_raw",
             description="Camera image topic"),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel",
             description="Velocity command topic for the base driver"),

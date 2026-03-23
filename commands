@@ -1,0 +1,36 @@
+sudo ip link set can0 type can bitrate 500000
+sudo ip link set can0 up
+
+**bash ~/ros2_ws/src/nomad_nav/start_camera.sh**
+
+navigate:
+
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+
+ros2 launch nomad_nav nomad_navigate.launch.py \
+model:=nomad \
+goal_image_path:=/home/charml/ros2_ws/src/nomad_nav/goal.jpg \
+image_topic:=/camera/image_raw \
+cmd_vel_topic:=/cmd_vel
+
+navigate with live visualization:
+
+ros2 launch nomad_nav nomad_navigate.launch.py \
+goal_image_path:=/home/charml/ros2_ws/src/nomad_nav/goal.jpg \
+image_topic:=/camera/image_raw \
+cmd_vel_topic:=/cmd_vel \
+enable_live_viz:=true
+
+topomap:
+
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+
+ros2 launch nomad_nav nomad_navigate.launch.py \
+model:=nomad \
+topomap_dir:=test_route_001 \
+goal_node:=-1 \
+image_topic:=/camera/image_raw \
+cmd_vel_topic:=/cmd_vel \
+enable_live_viz:=true

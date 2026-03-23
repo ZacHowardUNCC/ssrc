@@ -89,13 +89,13 @@ NUM_TRAJS=100
 START_INDEX=0
 TRAJ_PREFIX="traj"
 SAMPLE_RATE="4.0"
-IMAGE_TOPIC="/camera/image_raw"
+IMAGE_TOPIC="/camera/color/image_raw"
 ODOM_TOPIC="/odom"
 LOGS_ROOT=""
 ROSBAG_ROOT=""
 RECORD_ROSBAG="true"
 ZERO_ORIGIN="true"
-SYNC_TOLERANCE="1.5"
+SYNC_TOLERANCE="1.0"
 OVERWRITE="false"
 
 while [[ $# -gt 0 ]]; do

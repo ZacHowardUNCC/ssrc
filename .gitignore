@@ -1,4 +1,6 @@
 devel/
+data/
+install/
 logs/
 build/
 bin/
