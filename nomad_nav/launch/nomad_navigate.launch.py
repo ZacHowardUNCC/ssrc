@@ -1,13 +1,10 @@
 """
-ROS2 launch file for NoMaD navigation on Scout Mini.
+ROS2 launch file for NoMaD topomap navigation on Scout Mini.
 
 Launches the navigate node, PD controller, and optionally a joystick teleop node.
 
-Usage (topomap mode):
+Usage:
   ros2 launch nomad_nav nomad_navigate.launch.py topomap_dir:=my_route
-
-Usage (goal image mode):
-  ros2 launch nomad_nav nomad_navigate.launch.py goal_image_path:=/path/to/goal.png
 """
 
 import os
@@ -79,8 +76,6 @@ def generate_launch_description():
         # Launch arguments
         DeclareLaunchArgument("model", default_value="nomad",
             description="Model name (must match key in models.yaml)"),
-        DeclareLaunchArgument("goal_image_path", default_value="",
-            description="Path to a single goal image. If set, topomap is not used."),
         DeclareLaunchArgument("topomap_dir", default_value="topomap",
             description="Subdirectory under topomaps/images/"),
         DeclareLaunchArgument("goal_node", default_value="-1",
@@ -122,7 +117,6 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "model": LaunchConfiguration("model"),
-                "goal_image_path": LaunchConfiguration("goal_image_path"),
                 "waypoint_index": LaunchConfiguration("waypoint_index"),
                 "topomap_dir": LaunchConfiguration("topomap_dir"),
                 "goal_node": LaunchConfiguration("goal_node"),
@@ -160,16 +154,16 @@ def generate_launch_description():
             }],
         ),
 
-        Node(
-            package="nomad_nav",
-            executable="live_viz",
-            name="nomad_live_viz",
-            output="screen",
-            condition=IfCondition(LaunchConfiguration("enable_live_viz")),
-            parameters=[{
-                "image_topic": LaunchConfiguration("image_topic"),
-                "num_samples": LaunchConfiguration("num_samples"),
-                "window_name": LaunchConfiguration("viz_window_name"),
-            }],
-        ),
+        # Node(
+        #     package="nomad_nav",
+        #     executable="live_viz",
+        #     name="nomad_live_viz",
+        #     output="screen",
+        #     condition=IfCondition(LaunchConfiguration("enable_live_viz")),
+        #     parameters=[{
+        #         "image_topic": LaunchConfiguration("image_topic"),
+        #         "num_samples": LaunchConfiguration("num_samples"),
+        #         "window_name": LaunchConfiguration("viz_window_name"),
+        #     }],
+        # ),
     ])

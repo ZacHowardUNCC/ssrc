@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray
-from utils import msg_to_pil, to_numpy, transform_images, load_model
+from nomad_nav.utils import msg_to_pil, to_numpy, transform_images, load_model
 
 from vint_train.training.train_utils import get_action
 import torch
@@ -23,15 +23,19 @@ import yaml
 import time
 
 # UTILS
-from topic_names import (IMAGE_TOPIC,
+from nomad_nav.path_utils import (
+    get_default_model_config_path,
+    get_default_robot_config_path,
+    get_default_topomap_images_dir,
+)
+from nomad_nav.topic_names import (IMAGE_TOPIC,
                         WAYPOINT_TOPIC,
                         SAMPLED_ACTIONS_TOPIC)
 
 # CONSTANTS
-TOPOMAP_IMAGES_DIR = "../topomaps/images"
-MODEL_WEIGHTS_PATH = "../model_weights"
-ROBOT_CONFIG_PATH ="../config/robot.yaml"
-MODEL_CONFIG_PATH = "../config/models.yaml"
+TOPOMAP_IMAGES_DIR = get_default_topomap_images_dir()
+ROBOT_CONFIG_PATH = get_default_robot_config_path()
+MODEL_CONFIG_PATH = get_default_model_config_path()
 with open(ROBOT_CONFIG_PATH, "r") as f:
     robot_config = yaml.safe_load(f)
 MAX_V = robot_config["max_v"]
@@ -78,8 +82,8 @@ class NavigationNode(Node):
                 obs_images = obs_images.to(device)
                 mask = torch.zeros(1).long().to(device)  
 
-                start = max(closest_node - args.radius, 0)
-                end = min(closest_node + args.radius + 1, goal_node)
+                start = max(closest_node - self.args.radius, 0)
+                end = min(closest_node + self.args.radius + 1, goal_node)
                 goal_image = [transform_images(g_img, model_params["image_size"], center_crop=False).to(device) for g_img in topomap[start:end + 1]]
                 goal_image = torch.concat(goal_image, dim=0)
 
@@ -89,20 +93,20 @@ class NavigationNode(Node):
                 min_idx = np.argmin(dists)
                 closest_node = min_idx + start
                 print("closest node:", closest_node)
-                sg_idx = min(min_idx + int(dists[min_idx] < args.close_threshold), len(obsgoal_cond) - 1)
+                sg_idx = min(min_idx + int(dists[min_idx] < self.args.close_threshold), len(obsgoal_cond) - 1)
                 obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
 
                 # infer action
                 with torch.no_grad():
                     # encoder vision features
                     if len(obs_cond.shape) == 2:
-                        obs_cond = obs_cond.repeat(args.num_samples, 1)
+                        obs_cond = obs_cond.repeat(self.args.num_samples, 1)
                     else:
-                        obs_cond = obs_cond.repeat(args.num_samples, 1, 1)
+                        obs_cond = obs_cond.repeat(self.args.num_samples, 1, 1)
                     
                     # initialize action from Gaussian noise
                     noisy_action = torch.randn(
-                        (args.num_samples, model_params["len_traj_pred"], 2), device=device)
+                        (self.args.num_samples, model_params["len_traj_pred"], 2), device=device)
                     naction = noisy_action
 
                     # init scheduler
@@ -131,10 +135,10 @@ class NavigationNode(Node):
                 print("published sampled actions")
                 self.sampled_actions_pub.publish(sampled_actions_msg)
                 naction = naction[0] 
-                chosen_waypoint = naction[args.waypoint]
+                chosen_waypoint = naction[self.args.waypoint]
             else:
-                start = max(closest_node - args.radius, 0)
-                end = min(closest_node + args.radius + 1, goal_node)
+                start = max(closest_node - self.args.radius, 0)
+                end = min(closest_node + self.args.radius + 1, goal_node)
                 distances = []
                 waypoints = []
                 batch_obs_imgs = []
@@ -175,75 +179,8 @@ class NavigationNode(Node):
         if self.reached_goal:
             print("Reached goal! Stopping...")
 
-def main(args: argparse.Namespace):
-    global context_size, model_params, num_diffusion_iters, noise_scheduler, device, model, goal_node, closest_node, topomap
-
-     # load model parameters
-    with open(MODEL_CONFIG_PATH, "r") as f:
-        model_paths = yaml.safe_load(f)
-
-    model_config_path = model_paths[args.model]["config_path"]
-    with open(model_config_path, "r") as f:
-        model_params = yaml.safe_load(f)
-
-    context_size = model_params["context_size"]
-
-    # load model weights
-    ckpth_path = model_paths[args.model]["ckpt_path"]
-    if os.path.exists(ckpth_path):
-        print(f"Loading model from {ckpth_path}")
-    else:
-        raise FileNotFoundError(f"Model weights not found at {ckpth_path}")
-    model = load_model(
-        ckpth_path,
-        model_params,
-        device,
-    )
-    model = model.to(device)
-    model.eval()
-
-    
-     # load topomap
-    topomap_filenames = sorted(os.listdir(os.path.join(
-        TOPOMAP_IMAGES_DIR, args.dir)), key=lambda x: int(x.split(".")[0]))
-    topomap_dir = f"{TOPOMAP_IMAGES_DIR}/{args.dir}"
-    num_nodes = len(os.listdir(topomap_dir))
-    topomap = []
-    for i in range(num_nodes):
-        image_path = os.path.join(topomap_dir, topomap_filenames[i])
-        topomap.append(PILImage.open(image_path))
-
-    closest_node = 0
-    assert -1 <= args.goal_node < len(topomap), "Invalid goal index"
-    if args.goal_node == -1:
-        goal_node = len(topomap) - 1
-    else:
-        goal_node = args.goal_node
-
-    print("Registered with master node. Waiting for image observations...")
-
-    if model_params["model_type"] == "nomad":
-        num_diffusion_iters = model_params["num_diffusion_iters"]
-        noise_scheduler = DDPMScheduler(
-            num_train_timesteps=model_params["num_diffusion_iters"],
-            beta_schedule='squaredcos_cap_v2',
-            clip_sample=True,
-            prediction_type='epsilon'
-        )
-    
-    rclpy.init(args=None)
-    navigation_node = NavigationNode(args)
-
-    try:
-        rclpy.spin(navigation_node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        navigation_node.destroy_node()
-        rclpy.shutdown()
-
-
-if __name__ == "__main__":
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser for navigate node."""
     parser = argparse.ArgumentParser(
         description="Code to run GNM DIFFUSION EXPLORATION on the locobot")
     parser.add_argument(
@@ -299,7 +236,111 @@ if __name__ == "__main__":
         type=int,
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
+    return parser
+
+
+def _resolve_path_from_config(path: str, config_path: str) -> str:
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+    return os.path.abspath(os.path.join(os.path.dirname(config_path), path))
+
+
+def _resolve_topomap_dir(path: str) -> str:
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+    return os.path.join(TOPOMAP_IMAGES_DIR, path)
+
+
+def main(args=None):
+    """Main entry point for navigate node. Can be called from ROS2 entry point with no args."""
+    # Resolve arguments: if None, parse empty list to get defaults; if dict/list, parse it; if Namespace, use directly
+    if args is None or isinstance(args, (list, tuple)):
+        parser = _build_arg_parser()
+        args = parser.parse_args(args=args)
+    elif isinstance(args, dict):
+        # Convert dict to Namespace if passed as dict
+        args = argparse.Namespace(**args)
+    # else: assume it's already an argparse.Namespace
+    
+    global context_size, model_params, num_diffusion_iters, noise_scheduler, device, model, goal_node, closest_node, topomap
+
+     # load model parameters
+    with open(MODEL_CONFIG_PATH, "r") as f:
+        model_paths = yaml.safe_load(f)
+
+    model_config_path = _resolve_path_from_config(
+        model_paths[args.model]["config_path"],
+        MODEL_CONFIG_PATH,
+    )
+    with open(model_config_path, "r") as f:
+        model_params = yaml.safe_load(f)
+
+    context_size = model_params["context_size"]
+
+    # load model weights
+    ckpth_path = _resolve_path_from_config(
+        model_paths[args.model]["ckpt_path"],
+        MODEL_CONFIG_PATH,
+    )
+    if os.path.exists(ckpth_path):
+        print(f"Loading model from {ckpth_path}")
+    else:
+        raise FileNotFoundError(f"Model weights not found at {ckpth_path}")
+    model = load_model(
+        ckpth_path,
+        model_params,
+        device,
+    )
+    model = model.to(device)
+    model.eval()
+
+    
+     # load topomap
+    topomap_dir = _resolve_topomap_dir(args.dir)
+    topomap_filenames = sorted(
+        os.listdir(topomap_dir),
+        key=lambda x: int(x.split(".")[0]),
+    )
+    num_nodes = len(os.listdir(topomap_dir))
+    topomap = []
+    for i in range(num_nodes):
+        image_path = os.path.join(topomap_dir, topomap_filenames[i])
+        topomap.append(PILImage.open(image_path))
+
+    closest_node = 0
+    assert -1 <= args.goal_node < len(topomap), "Invalid goal index"
+    if args.goal_node == -1:
+        goal_node = len(topomap) - 1
+    else:
+        goal_node = args.goal_node
+
+    print("Registered with master node. Waiting for image observations...")
+
+    if model_params["model_type"] == "nomad":
+        num_diffusion_iters = model_params["num_diffusion_iters"]
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=model_params["num_diffusion_iters"],
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            prediction_type='epsilon'
+        )
+    
+    rclpy.init(args=None)
+    navigation_node = NavigationNode(args)
+
+    try:
+        rclpy.spin(navigation_node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        navigation_node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    parser = _build_arg_parser()
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)
-

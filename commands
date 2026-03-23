@@ -22,7 +22,7 @@ image_topic:=/camera/image_raw \
 cmd_vel_topic:=/cmd_vel \
 enable_live_viz:=true
 
-topomap:
+# RUN THIS for topomap
 
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash

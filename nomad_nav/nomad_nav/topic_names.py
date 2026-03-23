@@ -1,21 +1,30 @@
-# Topic names for ROS2 NoMaD navigation on Scout Mini.
-# These are default values. All topics used by nodes are exposed as
-# ROS2 parameters or launch arguments so they can be remapped without
-# editing this file.
+# topic names for ROS communication
 
-# Camera
-IMAGE_TOPIC = "/camera/image_raw"
+# image obs topics
+IMAGE_TOPIC = "/camera/color/image_raw"
 
-# Navigation internals (between navigate and pd_controller)
+# exploration topics
+SUBGOALS_TOPIC = "/subgoals"
+GRAPH_NAME_TOPIC = "/graph_name"
 WAYPOINT_TOPIC = "/waypoint"
-SAMPLED_ACTIONS_TOPIC = "/sampled_actions"
+REVERSE_MODE_TOPIC = "/reverse_mode"
+SAMPLED_OUTPUTS_TOPIC = "/sampled_outputs"
 REACHED_GOAL_TOPIC = "/topoplan/reached_goal"
+SAMPLED_WAYPOINTS_GRAPH_TOPIC = "/sampled_waypoints_graph"
+BACKTRACKING_IMAGE_TOPIC = "/backtracking_image"
+FRONTIER_IMAGE_TOPIC = "/frontier_image"
+SUBGOALS_SHAPE_TOPIC = "/subgoal_shape"
+SAMPLED_ACTIONS_TOPIC = "/sampled_actions"
+ANNOTATED_IMAGE_TOPIC = "/annotated_image"
+CURRENT_NODE_IMAGE_TOPIC = "/current_node_image"
+FLIP_DIRECTION_TOPIC = "/flip_direction"
+TURNING_TOPIC = "/turning"
+SUBGOAL_GEN_RATE_TOPIC = "/subgoal_gen_rate"
+MARKER_TOPIC = "/visualization_marker_array"
+VIZ_NAV_IMAGE_TOPIC = "/nav_image"
 
-# Robot base
+# visualization topics
+CHOSEN_SUBGOAL_TOPIC = "/chosen_subgoal"
+
+# recorded on the robot
 ODOM_TOPIC = "/odom"
-CMD_VEL_TOPIC = "/cmd_vel"
-
-# Joystick teleop override
-JOY_TOPIC = "/joy"
-JOY_CMD_VEL_TOPIC = "/cmd_vel_teleop"
-JOY_BUMPER_TOPIC = "/joy_bumper"
