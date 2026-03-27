@@ -1,15 +1,8 @@
 """
-NoMaD goal-conditioned navigation node (ROS2 Humble).
+NoMaD topomap navigation node (ROS2 Humble).
 
-Supports two navigation modes:
-
-  1. Goal image mode (goal_image_path is set):
-     Runs diffusion conditioned on a single goal image.
-     No topomap needed. Good for basic deployment testing.
-
-  2. Topomap mode (default, goal_image_path is empty):
-     Loads a topomap, localizes via the distance head,
-     selects subgoals, and runs diffusion toward each.
+Loads a topomap, localizes via the distance head,
+selects subgoals, and runs diffusion toward each.
 
 Dataflow:
   /camera/image_raw -> vision_encoder -> diffusion -> /waypoint
@@ -74,8 +67,6 @@ class NavigateNode(Node):
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("robot_config_path", "")
         self.declare_parameter("model_config_path", "")
-        # Goal image mode: set this to a file path to skip topomap entirely
-        self.declare_parameter("goal_image_path", "")
         # Topomap mode parameters
         self.declare_parameter("topomap_dir", "topomap")
         self.declare_parameter("topomap_images_dir", "")
@@ -90,7 +81,6 @@ class NavigateNode(Node):
         image_topic = self.get_parameter("image_topic").value
         robot_config_path = self.get_parameter("robot_config_path").value
         model_config_path = self.get_parameter("model_config_path").value
-        self.goal_image_path = self.get_parameter("goal_image_path").value
         self.close_threshold = self.get_parameter("close_threshold").value
         self.radius = self.get_parameter("radius").value
 
@@ -148,17 +138,13 @@ class NavigateNode(Node):
                 prediction_type="epsilon",
             )
 
-        # Determine navigation mode
-        self.goal_image = None
+        # Topomap state
         self.topomap = None
         self.closest_node = 0
         self.goal_node = 0
         self.reached_goal = False
 
-        if self.goal_image_path:
-            self._init_goal_image_mode()
-        else:
-            self._init_topomap_mode()
+        self._init_topomap_mode()
 
         # Context queue for observation images
         self.context_queue = []
@@ -181,17 +167,6 @@ class NavigateNode(Node):
         self.timer = self.create_timer(1.0 / self.rate_hz, self._navigate_tick)
         self.get_logger().info(
             f"Navigate node ready. Waiting for images on '{image_topic}'"
-        )
-
-    def _init_goal_image_mode(self):
-        """Load a single goal image for direct goal-conditioned navigation."""
-        if not os.path.isfile(self.goal_image_path):
-            raise FileNotFoundError(
-                f"Goal image not found: {self.goal_image_path}"
-            )
-        self.goal_image = PILImage.open(self.goal_image_path).convert("RGB")
-        self.get_logger().info(
-            f"Goal image mode: navigating toward {self.goal_image_path}"
         )
 
     def _init_topomap_mode(self):
@@ -240,9 +215,7 @@ class NavigateNode(Node):
 
         mp = self.model_params
 
-        if self.goal_image is not None:
-            chosen_waypoint = self._navigate_goal_image(mp)
-        elif mp["model_type"] == "nomad":
+        if mp["model_type"] == "nomad":
             chosen_waypoint = self._navigate_nomad(mp)
         else:
             chosen_waypoint = self._navigate_vint(mp)
@@ -254,8 +227,7 @@ class NavigateNode(Node):
         waypoint_msg.data = [float(x) for x in chosen_waypoint]
         self.waypoint_pub.publish(waypoint_msg)
 
-        if self.topomap is not None:
-            self.reached_goal = bool(self.closest_node == self.goal_node)
+        self.reached_goal = bool(self.closest_node == self.goal_node)
         goal_msg = Bool()
         goal_msg.data = bool(self.reached_goal)
         self.goal_pub.publish(goal_msg)
@@ -306,44 +278,7 @@ class NavigateNode(Node):
 
         return naction
 
-    def _navigate_goal_image(self, mp: dict) -> np.ndarray:
-        """Navigate toward a single goal image (no topomap)."""
-        obs_images = self._prepare_obs(mp)
-        mask = torch.zeros(1).long().to(self.device)
-
-        goal_tensor = transform_images(
-            self.goal_image, mp["image_size"], center_crop=False
-        ).to(self.device)
-
-        obs_cond = self.model(
-            "vision_encoder",
-            obs_img=obs_images,
-            goal_img=goal_tensor,
-            input_goal_mask=mask,
-        )
-
-        naction = self._run_diffusion(obs_cond, mp)
-        return naction[0][self.waypoint_index]
-
-    def _navigate_nomad(self, mp: dict) -> np.ndarray:
-        """Topomap navigation: localize, select subgoal, run diffusion."""
-        obs_images = self._prepare_obs(mp)
-        mask = torch.zeros(1).long().to(self.device)
-
-        start = max(self.closest_node - self.radius, 0)
-        end = min(self.closest_node + self.radius + 1, self.goal_node)
-        goal_images = torch.concat([
-            transform_images(g, mp["image_size"], center_crop=False).to(self.device)
-            for g in self.topomap[start:end + 1]
-        ], dim=0)
-
-        obsgoal_cond = self.model(
-            "vision_encoder",
-            obs_img=obs_images.repeat(len(goal_images), 1, 1, 1),
-            goal_img=goal_images,
-            input_goal_mask=mask.repeat(len(goal_images)),
-        )
-        dists = to_numpy(self.model("dist_pred_net", obsgoal_cond=obsgoal_cond).flatten())
+goal_cond=obsgoal_cond).flatten())
 
         min_idx = int(np.argmin(dists))
         self.closest_node = int(min_idx + start)
