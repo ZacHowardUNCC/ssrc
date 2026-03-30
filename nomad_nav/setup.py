@@ -28,6 +28,7 @@ setup(
             "create_topomap = nomad_nav.create_topomap:main",
             "collect_trajectory = nomad_nav.collect_trajectory:main",
             "live_viz = nomad_nav.live_viz:main",
+            "nav_logger = nomad_nav.nav_logger:main",
         ],
     },
 )

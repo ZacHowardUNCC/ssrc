@@ -8,6 +8,8 @@ Also subscribes to /topoplan/reached_goal to stop the robot when
 the goal is reached.
 """
 
+import time
+
 import numpy as np
 import yaml
 
@@ -21,7 +23,7 @@ from nomad_nav.ros_data import ROSData
 
 
 EPS = 1e-8
-WAYPOINT_TIMEOUT = 1.0  # seconds
+WAYPOINT_TIMEOUT = 5.0  # seconds (inference takes ~3s on CPU)
 
 
 def clip_angle(theta: float) -> float:
@@ -40,6 +42,11 @@ def pd_control(waypoint: np.ndarray, dt: float, max_v: float, max_w: float):
     else:
         dx, dy, hx, hy = waypoint
 
+    # Minimum forward distance for angular calculation.  When the
+    # subgoal is closer than this, use MIN_DX so that the heading
+    # correction stays proportional instead of blowing up.
+    MIN_DX = 0.10  # metres
+
     if len(waypoint) == 4 and abs(dx) < EPS and abs(dy) < EPS:
         v = 0.0
         w = clip_angle(np.arctan2(hy, hx)) / dt
@@ -48,7 +55,7 @@ def pd_control(waypoint: np.ndarray, dt: float, max_v: float, max_w: float):
         w = np.sign(dy) * np.pi / (2 * dt)
     else:
         v = dx / dt
-        w = np.arctan(dy / dx) / dt
+        w = np.arctan(dy / max(dx, MIN_DX)) / dt
 
     v = float(np.clip(v, 0.0, max_v))
     w = float(np.clip(w, -max_w, max_w))
@@ -79,17 +86,20 @@ class PDControllerNode(Node):
         # -- State --
         self.waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
         self.reached_goal = False
+        self._goal_streak = 0        # consecutive goal=True messages received
+        self._wp_arrival_time = 0.0  # monotonic time when last waypoint arrived
+        self._last_v = 0.0           # cached linear velocity from last pd_control
 
         # -- Subscribers --
         self.create_subscription(
-            Float32MultiArray, "/waypoint", self._waypoint_callback, 10
+            Float32MultiArray, "/waypoint", self._waypoint_callback, 1
         )
         self.create_subscription(
-            Bool, "/topoplan/reached_goal", self._goal_callback, 10
+            Bool, "/topoplan/reached_goal", self._goal_callback, 1
         )
 
         # -- Publisher --
-        self.vel_pub = self.create_publisher(Twist, cmd_vel_topic, 10)
+        self.vel_pub = self.create_publisher(Twist, cmd_vel_topic, 1)
 
         # -- Timer --
         self.timer = self.create_timer(1.0 / rate_hz, self._control_tick)
@@ -99,9 +109,18 @@ class PDControllerNode(Node):
 
     def _waypoint_callback(self, msg: Float32MultiArray):
         self.waypoint.set(list(msg.data))
+        self._wp_arrival_time = time.monotonic()
 
     def _goal_callback(self, msg: Bool):
-        self.reached_goal = msg.data
+        # Require 3 consecutive goal=True messages before latching.
+        # Each message arrives once per inference (~3s), so this means
+        # the model must confirm goal reached 3 times in a row (~9s).
+        if msg.data:
+            self._goal_streak += 1
+            if self._goal_streak >= 3:
+                self.reached_goal = True
+        else:
+            self._goal_streak = 0
 
     def _control_tick(self):
         vel_msg = Twist()
@@ -118,6 +137,16 @@ class PDControllerNode(Node):
                 self.max_v,
                 self.max_w,
             )
+            self._last_v = v
+
+            # w is a heading correction meant for one dt frame, but we
+            # need multiple controller ticks to actually execute it.
+            # Apply w for up to 1s (≈9 ticks at 9Hz), then drive
+            # straight until the next waypoint arrives.
+            age = time.monotonic() - self._wp_arrival_time
+            if age > 1.0:
+                w = 0.0
+
             vel_msg.linear.x = v
             vel_msg.angular.z = w
             self.get_logger().debug(f"cmd_vel: v={v:.3f}, w={w:.3f}")

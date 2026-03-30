@@ -1,17 +1,13 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torchvision import transforms
-import torchvision.transforms.functional as TF
+# torchvision replaced with pure torch/PIL equivalents to avoid ABI mismatch
+# on Jetson with custom NVIDIA PyTorch builds
 from PIL import Image as PILImage
 from typing import List
 from sensor_msgs.msg import Image
 
-from nomad_nav.path_utils import ensure_visualnav_python_paths
-
-ensure_visualnav_python_paths()
-
-from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
+IMAGE_ASPECT_RATIO = 4 / 3  # all images are centered cropped to a 4:3 aspect ratio
 
 
 def load_model(
@@ -209,35 +205,42 @@ def to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.cpu().detach().numpy()
 
 
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
+_IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+
+
+def _center_crop(pil_img: PILImage.Image, aspect_ratio: float) -> PILImage.Image:
+    """Crop PIL image to the given aspect ratio (width/height) from the center."""
+    w, h = pil_img.size
+    if w > h:
+        new_w = int(h * aspect_ratio)
+        left = (w - new_w) // 2
+        pil_img = pil_img.crop((left, 0, left + new_w, h))
+    else:
+        new_h = int(w / aspect_ratio)
+        top = (h - new_h) // 2
+        pil_img = pil_img.crop((0, top, w, top + new_h))
+    return pil_img
+
+
 def transform_images(
     pil_imgs: List[PILImage.Image],
     image_size: List[int],
     center_crop: bool = False,
 ) -> torch.Tensor:
     """Transform a list of PIL images (or a single image) to a torch tensor."""
-    transform_type = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
-            ),
-        ]
-    )
     if not isinstance(pil_imgs, list):
         pil_imgs = [pil_imgs]
     transf_imgs = []
     for pil_img in pil_imgs:
-        w, h = pil_img.size
         if center_crop:
-            if w > h:
-                pil_img = TF.center_crop(pil_img, (h, int(h * IMAGE_ASPECT_RATIO)))
-            else:
-                pil_img = TF.center_crop(pil_img, (int(w / IMAGE_ASPECT_RATIO), w))
+            pil_img = _center_crop(pil_img, IMAGE_ASPECT_RATIO)
         pil_img = pil_img.resize(image_size)
-        transf_img = transform_type(pil_img)
-        transf_img = torch.unsqueeze(transf_img, 0)
-        transf_imgs.append(transf_img)
+        # ToTensor: HWC uint8 → CHW float32 in [0,1]
+        t = torch.from_numpy(np.array(pil_img, dtype=np.uint8)).permute(2, 0, 1).float() / 255.0
+        # Normalize with ImageNet mean/std
+        t = (t - _IMAGENET_MEAN) / _IMAGENET_STD
+        transf_imgs.append(t.unsqueeze(0))
     return torch.cat(transf_imgs, dim=1)
 
 

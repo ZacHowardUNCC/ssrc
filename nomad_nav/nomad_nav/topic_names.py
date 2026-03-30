@@ -4,7 +4,7 @@
 # editing this file.
 
 # Camera
-IMAGE_TOPIC = "/camera/image_raw"
+IMAGE_TOPIC = "/camera/color/image_raw"
 
 # Navigation internals (between navigate and pd_controller)
 WAYPOINT_TOPIC = "/waypoint"

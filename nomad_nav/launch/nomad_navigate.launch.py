@@ -160,6 +160,17 @@ def generate_launch_description():
             }],
         ),
 
+        # Navigation diagnostic logger (always runs)
+        Node(
+            package="nomad_nav",
+            executable="nav_logger",
+            name="nomad_nav_logger",
+            output="screen",
+            parameters=[{
+                "robot_config_path": LaunchConfiguration("robot_config_path"),
+            }],
+        ),
+
         Node(
             package="nomad_nav",
             executable="live_viz",
