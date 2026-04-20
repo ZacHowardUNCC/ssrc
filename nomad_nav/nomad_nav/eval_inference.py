@@ -293,13 +293,12 @@ def _eval_traj(traj_dir, model, noise_scheduler, model_params,
                 ).prev_sample
 
         naction_out = to_numpy(get_action(naction))
-        waypoints   = naction_out[:, args.waypoint, :].copy()
+        chosen_waypoint = naction_out[0][args.waypoint].copy()  # sample 0 only, matches navigate.py
         if model_params["normalize"]:
-            waypoints[:, :2] *= MAX_V / RATE
-        chosen = waypoints.mean(axis=0)
+            chosen_waypoint[:2] *= MAX_V / RATE
 
-        pred_dx = float(chosen[0])
-        pred_dy = float(chosen[1])
+        pred_dx = float(chosen_waypoint[0])
+        pred_dy = float(chosen_waypoint[1])
 
         error_dx        = pred_dx - gt_dx
         error_dy        = pred_dy - gt_dy
@@ -420,8 +419,8 @@ def main():
         help="Full path to a single trajectory folder",
     )
     parser.add_argument(
-        "--traj", default=None,
-        help="Single trajectory name (e.g. traj_000)",
+        "--traj", nargs="+", default=None, metavar="TRAJ",
+        help="One or more trajectory names (e.g. --traj traj_000 traj_001)",
     )
     parser.add_argument(
         "--trajs", nargs="+", default=None, metavar="TRAJ",
@@ -484,7 +483,7 @@ def main():
     elif args.trajs:
         traj_dirs = [os.path.join(DEFAULT_DATASET_DIR, t) for t in args.trajs]
     elif args.traj:
-        traj_dirs = [os.path.join(DEFAULT_DATASET_DIR, args.traj)]
+        traj_dirs = [os.path.join(DEFAULT_DATASET_DIR, t) for t in args.traj]
     elif args.traj_dir:
         traj_dirs = [args.traj_dir]
     else:

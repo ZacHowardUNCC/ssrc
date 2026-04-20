@@ -44,7 +44,10 @@ def generate_launch_description():
         ],
     )
 
-    # RealSense camera driver
+    # RealSense camera driver — RGB only, 640x480 @ 15 fps.
+    # Depth, IR, and pointcloud are disabled: NoMaD uses only RGB images.
+    # Reducing from default 1280x720@30 to 640x480@15 roughly halves USB
+    # bandwidth and CPU load on the Jetson, reducing CAN bus interference.
     realsense = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -56,6 +59,14 @@ def generate_launch_description():
         launch_arguments={
             'camera_namespace': '/',
             'camera_name': 'camera',
+            # Streams
+            'enable_color': 'true',
+            'enable_depth': 'false',
+            'enable_infra1': 'false',
+            'enable_infra2': 'false',
+            # Color profile: 640x480 @ 30 fps — matches 30 Hz collection rate
+            'rgb_camera.color_profile': '640,480,30',
+            'rgb_camera.color_format': 'RGB8',
         }.items(),
     )
 

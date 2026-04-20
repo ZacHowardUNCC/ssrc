@@ -84,18 +84,18 @@ Example:
 EOF
 }
 
-OUTPUT_ROOT="$HOME/ros2_ws/data/nomad_dataset"
+OUTPUT_ROOT="$HOME/ros2_ws/data/scout_mini_collection/nomad_finetune"
 NUM_TRAJS=100
 START_INDEX=0
 TRAJ_PREFIX="traj"
-SAMPLE_RATE="4.0"
+SAMPLE_RATE="30.0"
 IMAGE_TOPIC="/camera/color/image_raw"
 ODOM_TOPIC="/odom"
 LOGS_ROOT=""
 ROSBAG_ROOT=""
 RECORD_ROSBAG="true"
 ZERO_ORIGIN="true"
-SYNC_TOLERANCE="1.0"
+SYNC_TOLERANCE="0.1"
 OVERWRITE="false"
 
 while [[ $# -gt 0 ]]; do

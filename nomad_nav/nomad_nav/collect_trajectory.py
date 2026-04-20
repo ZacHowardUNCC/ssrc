@@ -144,6 +144,7 @@ class CollectTrajectoryNode(Node):
         self.declare_parameter("zero_origin", True)
         self.declare_parameter("sync_tolerance_s", 0.25)
         self.declare_parameter("max_samples", -1)
+        self.declare_parameter("max_odom_jump_m", 0.083)
 
         output_dir = str(self.get_parameter("output_dir").value).strip()
         if not output_dir:
@@ -159,6 +160,7 @@ class CollectTrajectoryNode(Node):
         self.zero_origin = bool(self.get_parameter("zero_origin").value)
         self.sync_tolerance_s = float(self.get_parameter("sync_tolerance_s").value)
         self.max_samples = int(self.get_parameter("max_samples").value)
+        self.max_odom_jump_m = float(self.get_parameter("max_odom_jump_m").value)
 
         if self.sample_rate_hz <= 0.0:
             raise ValueError("sample_rate_hz must be positive")
@@ -283,6 +285,18 @@ class CollectTrajectoryNode(Node):
             if self.origin_xy is None:
                 self.origin_xy = xy.copy()
             xy = xy - self.origin_xy
+
+        if self.positions and self.max_odom_jump_m > 0.0:
+            last = np.array(self.positions[-1], dtype=np.float32)
+            jump = float(np.linalg.norm(xy - last))
+            if jump > self.max_odom_jump_m:
+                self._warn_throttled(
+                    "odom_jump",
+                    f"Odom jump {jump:.2f}m exceeds max_odom_jump_m={self.max_odom_jump_m:.2f}m "
+                    f"— dropping frame (CAN glitch?)",
+                    period_s=1.0,
+                )
+                return
 
         image_path = os.path.join(self.output_dir, f"{self.frame_index}.{self.image_ext}")
         if self.image_ext in ("jpg", "jpeg"):

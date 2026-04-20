@@ -197,7 +197,9 @@ class NavigateNode(Node):
                 ).tolist()
                 print("published sampled actions")
                 self.sampled_actions_pub.publish(sampled_actions_msg)
+                print(naction) # DEBUG
                 naction = naction[0]
+                print(naction) # DEBUG
                 chosen_waypoint = naction[self.args.waypoint]
             else:
                 start = max(closest_node - self.args.radius, 0)
