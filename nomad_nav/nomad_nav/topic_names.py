@@ -10,6 +10,8 @@ IMAGE_TOPIC = "/camera/color/image_raw"
 WAYPOINT_TOPIC = "/waypoint"
 SAMPLED_ACTIONS_TOPIC = "/sampled_actions"
 REACHED_GOAL_TOPIC = "/topoplan/reached_goal"
+NWM_RANKING_REQUEST_TOPIC = "/nwm/ranking/request"
+NWM_RANKING_RESULT_TOPIC = "/nwm/ranking/result"
 
 # Robot base
 ODOM_TOPIC = "/odom"

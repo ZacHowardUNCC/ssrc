@@ -9,6 +9,7 @@ Dataflow:
 """
 
 import os
+import threading
 from typing import Tuple, Sequence, Dict, Union, Optional, Callable
 import numpy as np
 import torch
@@ -19,10 +20,12 @@ import yaml
 
 # ROS2
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, Int32MultiArray, UInt8MultiArray
 
 from nomad_nav.path_utils import (
     ensure_visualnav_python_paths,
@@ -33,11 +36,14 @@ from nomad_nav.path_utils import (
 
 ensure_visualnav_python_paths()
 
+from nomad_nav.nwm_request import serialize_ranking_request
 from nomad_nav.utils import msg_to_pil, to_numpy, transform_images, load_model
 from nomad_nav.topic_names import (IMAGE_TOPIC,
                                     WAYPOINT_TOPIC,
                                     SAMPLED_ACTIONS_TOPIC,
-                                    REACHED_GOAL_TOPIC)
+                                    REACHED_GOAL_TOPIC,
+                                    NWM_RANKING_REQUEST_TOPIC,
+                                    NWM_RANKING_RESULT_TOPIC)
 from vint_train.training.train_utils import get_action
 
 from PIL import Image as PILImage
@@ -57,6 +63,7 @@ RATE = robot_config["frame_rate"]
 
 # GLOBALS
 context_queue = []
+context_lock = threading.Lock()
 context_size = None
 model = None
 model_params = None
@@ -67,6 +74,8 @@ reached_goal = False
 num_diffusion_iters = None
 noise_scheduler = None
 subgoal = []
+NWM_REQUEST_REPUBLISH_SEC = 1.0
+STATUS_LOG_PERIOD_SEC = 5.0
 
 # Load the model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,11 +85,20 @@ print("Using device:", device)
 def callback_obs(msg):
     obs_img = msg_to_pil(msg)
     if context_size is not None:
-        if len(context_queue) < context_size + 1:
-            context_queue.append(obs_img)
-        else:
-            context_queue.pop(0)
-            context_queue.append(obs_img)
+        with context_lock:
+            if len(context_queue) < context_size + 1:
+                context_queue.append(obs_img)
+            else:
+                context_queue.pop(0)
+                context_queue.append(obs_img)
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 class NavigateNode(Node):
@@ -89,6 +107,14 @@ class NavigateNode(Node):
     def __init__(self, args):
         super().__init__("nomad_navigate")
         self.args = args
+        self.image_topic = getattr(self.args, "image_topic", IMAGE_TOPIC)
+        self.nwm_request_topic = getattr(
+            self.args, "nwm_request_topic", NWM_RANKING_REQUEST_TOPIC
+        )
+        self.nwm_result_topic = getattr(
+            self.args, "nwm_result_topic", NWM_RANKING_RESULT_TOPIC
+        )
+        self.last_context_wait_log_time = 0.0
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -96,7 +122,7 @@ class NavigateNode(Node):
             depth=1,
         )
         self.image_sub = self.create_subscription(
-            Image, IMAGE_TOPIC, callback_obs, sensor_qos
+            Image, self.image_topic, callback_obs, sensor_qos
         )
         self.waypoint_pub = self.create_publisher(
             Float32MultiArray, WAYPOINT_TOPIC, 1
@@ -104,24 +130,177 @@ class NavigateNode(Node):
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
         )
+        self.nwm_request_pub = self.create_publisher(
+            UInt8MultiArray, self.nwm_request_topic, 1
+        )
         self.goal_pub = self.create_publisher(
             Bool, REACHED_GOAL_TOPIC, 1
         )
 
-        self.timer = self.create_timer(1.0 / RATE, self.timer_callback)
-        self.get_logger().info(
-            "Registered with master node. Waiting for image observations..."
+        self.timer_group = MutuallyExclusiveCallbackGroup()
+        self.nwm_result_group = MutuallyExclusiveCallbackGroup()
+        self.pending_ranking_request_id: Optional[int] = None
+        self.pending_ranking_best_index: Optional[int] = None
+        self.pending_ranking_event = threading.Event()
+        self.ranking_lock = threading.Lock()
+        self.next_ranking_request_id = 1
+
+        self.nwm_result_sub = self.create_subscription(
+            Int32MultiArray,
+            self.nwm_result_topic,
+            self._nwm_ranking_result_cb,
+            10,
+            callback_group=self.nwm_result_group,
         )
+        self.timer = self.create_timer(
+            1.0 / RATE,
+            self.timer_callback,
+            callback_group=self.timer_group,
+        )
+        self.get_logger().info(
+            "Navigate node ready. "
+            f"image='{self.image_topic}', "
+            f"nwm_request='{self.nwm_request_topic}', "
+            f"nwm_result='{self.nwm_result_topic}', "
+            f"enable_nwm_ranking={self.args.enable_nwm_ranking}. "
+            "Waiting for image observations..."
+        )
+
+    def _nwm_ranking_result_cb(self, msg: Int32MultiArray):
+        if len(msg.data) < 2:
+            self.get_logger().warn("Ignoring malformed NWM ranking result.")
+            return
+
+        request_id = int(msg.data[0])
+        best_index = int(msg.data[1])
+        with self.ranking_lock:
+            if self.pending_ranking_request_id != request_id:
+                return
+            self.pending_ranking_best_index = best_index
+            self.pending_ranking_event.set()
+        self.get_logger().info(
+            f"Received NWM ranking result {request_id} with best_index={best_index}."
+        )
+
+    def _wait_for_nwm_ranking_result(self, request_id: int, msg: UInt8MultiArray) -> bool:
+        timeout_sec = float(self.args.nwm_ranking_timeout_sec)
+        deadline = None if timeout_sec <= 0 else time.monotonic() + timeout_sec
+        republish_count = 0
+        last_status_log_time = time.monotonic()
+
+        if deadline is None:
+            self.get_logger().info(
+                f"Waiting indefinitely for NWM ranking result {request_id}; "
+                f"republishing every {NWM_REQUEST_REPUBLISH_SEC:.1f}s until a reply arrives."
+            )
+        else:
+            self.get_logger().info(
+                f"Waiting up to {timeout_sec:.3f}s for NWM ranking result {request_id}; "
+                f"republishing every {NWM_REQUEST_REPUBLISH_SEC:.1f}s until timeout."
+            )
+
+        while rclpy.ok():
+            wait_sec = NWM_REQUEST_REPUBLISH_SEC
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                wait_sec = min(wait_sec, remaining)
+
+            if self.pending_ranking_event.wait(wait_sec):
+                return True
+
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+
+            self.nwm_request_pub.publish(msg)
+            republish_count += 1
+
+            now = time.monotonic()
+            if republish_count == 1 or now - last_status_log_time >= STATUS_LOG_PERIOD_SEC:
+                subscriber_count = self.nwm_request_pub.get_subscription_count()
+                log_fn = self.get_logger().warn if subscriber_count == 0 else self.get_logger().info
+                log_fn(
+                    f"Still waiting for NWM ranking result {request_id}; "
+                    f"republished {republish_count} time(s) on '{self.nwm_request_topic}' "
+                    f"(subscribers={subscriber_count})."
+                )
+                last_status_log_time = now
+
+        return False
+
+    def _choose_action_index_with_nwm(
+        self,
+        context_images,
+        goal_image,
+        sampled_actions_metric: np.ndarray,
+    ) -> int:
+        request_id = self.next_ranking_request_id
+        self.next_ranking_request_id += 1
+
+        try:
+            payload = serialize_ranking_request(
+                request_id=request_id,
+                context_images=context_images,
+                goal_image=goal_image,
+                sampled_actions=sampled_actions_metric,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self.get_logger().warn(f"Failed to serialize NWM ranking request: {exc}")
+            return 0
+
+        msg = UInt8MultiArray()
+        msg.data = np.frombuffer(payload, dtype=np.uint8).tolist()
+
+        with self.ranking_lock:
+            self.pending_ranking_request_id = request_id
+            self.pending_ranking_best_index = None
+            self.pending_ranking_event.clear()
+
+        self.nwm_request_pub.publish(msg)
+        subscriber_count = self.nwm_request_pub.get_subscription_count()
+        log_fn = self.get_logger().warn if subscriber_count == 0 else self.get_logger().info
+        log_fn(
+            f"Published NWM ranking request {request_id} on '{self.nwm_request_topic}' "
+            f"({sampled_actions_metric.shape[0]} samples, {len(context_images)} context frames, "
+            f"{len(msg.data)} bytes, subscribers={subscriber_count})."
+        )
+        got_result = self._wait_for_nwm_ranking_result(request_id, msg)
+
+        with self.ranking_lock:
+            best_index = self.pending_ranking_best_index
+            self.pending_ranking_request_id = None
+            self.pending_ranking_best_index = None
+            self.pending_ranking_event.clear()
+
+        if not got_result or best_index is None:
+            self.get_logger().warn(
+                f"NWM ranking timed out after {self.args.nwm_ranking_timeout_sec:.3f}s. "
+                "Falling back to sample 0."
+            )
+            return 0
+
+        if best_index < 0 or best_index >= sampled_actions_metric.shape[0]:
+            self.get_logger().warn(
+                f"NWM returned invalid sample index {best_index}. Falling back to sample 0."
+            )
+            return 0
+
+        return best_index
 
     def timer_callback(self):
         global closest_node, reached_goal
 
         # EXPLORATION MODE
         chosen_waypoint = np.zeros(4)
-        if len(context_queue) > model_params["context_size"]:
+        with context_lock:
+            local_context_queue = list(context_queue)
+
+        required_context_frames = model_params["context_size"] + 1
+        if len(local_context_queue) >= required_context_frames:
             if model_params["model_type"] == "nomad":
                 obs_images = transform_images(
-                    context_queue, model_params["image_size"], center_crop=False
+                    local_context_queue, model_params["image_size"], center_crop=False
                 )
                 obs_images = torch.split(obs_images, 3, dim=1)
                 obs_images = torch.cat(obs_images, dim=1)
@@ -154,6 +333,7 @@ class NavigateNode(Node):
                     len(obsgoal_cond) - 1,
                 )
                 obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
+                selected_goal_img = topomap[start + sg_idx]
 
                 # infer action
                 with torch.no_grad():
@@ -191,14 +371,25 @@ class NavigateNode(Node):
                     print("time elapsed:", time.time() - start_time)
 
                 naction = to_numpy(get_action(naction))
+                ranking_actions_metric = np.array(naction, copy=True)
+                if model_params["normalize"]:
+                    ranking_actions_metric[..., :2] *= MAX_V / RATE
+
+                chosen_index = 0
+                if self.args.enable_nwm_ranking and ranking_actions_metric.shape[0] > 1:
+                    chosen_index = self._choose_action_index_with_nwm(
+                        context_images=local_context_queue,
+                        goal_image=selected_goal_img,
+                        sampled_actions_metric=ranking_actions_metric,
+                    )
                 sampled_actions_msg = Float32MultiArray()
                 sampled_actions_msg.data = np.concatenate(
-                    (np.array([0]), naction.flatten())
+                    (np.array([chosen_index], dtype=np.float32), naction.flatten())
                 ).tolist()
                 print("published sampled actions")
                 self.sampled_actions_pub.publish(sampled_actions_msg)
                 print(naction) # DEBUG
-                naction = naction[0]
+                naction = naction[chosen_index]
                 print(naction) # DEBUG
                 chosen_waypoint = naction[self.args.waypoint]
             else:
@@ -210,7 +401,7 @@ class NavigateNode(Node):
                 batch_goal_data = []
                 for i, sg_img in enumerate(topomap[start : end + 1]):
                     transf_obs_img = transform_images(
-                        context_queue, model_params["image_size"]
+                        local_context_queue, model_params["image_size"]
                     )
                     goal_data = transform_images(
                         sg_img, model_params["image_size"]
@@ -236,6 +427,14 @@ class NavigateNode(Node):
                         min(min_dist_idx + 1, len(waypoints) - 1)
                     ][self.args.waypoint]
                     closest_node = min(start + min_dist_idx + 1, goal_node)
+        else:
+            now = time.monotonic()
+            if now - self.last_context_wait_log_time >= STATUS_LOG_PERIOD_SEC:
+                self.get_logger().info(
+                    f"Waiting for images on '{self.image_topic}' before navigation can start "
+                    f"({len(local_context_queue)}/{required_context_frames} context frames)."
+                )
+                self.last_context_wait_log_time = now
 
         # RECOVERY MODE
         if model_params["normalize"]:
@@ -308,6 +507,35 @@ def _build_arg_parser():
         type=int,
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
+    parser.add_argument(
+        "--enable-nwm-ranking",
+        action="store_true",
+        help="Request an external NWM ranker to choose the best sampled action.",
+    )
+    parser.add_argument(
+        "--nwm-ranking-timeout-sec",
+        default=-1.0,
+        type=float,
+        help="How long to wait for an NWM ranking reply before falling back to sample 0. Set <= 0 to wait forever.",
+    )
+    parser.add_argument(
+        "--image-topic",
+        default=IMAGE_TOPIC,
+        type=str,
+        help="Camera image topic.",
+    )
+    parser.add_argument(
+        "--nwm-request-topic",
+        default=NWM_RANKING_REQUEST_TOPIC,
+        type=str,
+        help="Topic used to publish serialized NWM ranking requests.",
+    )
+    parser.add_argument(
+        "--nwm-result-topic",
+        default=NWM_RANKING_RESULT_TOPIC,
+        type=str,
+        help="Topic used to receive [request_id, best_index] NWM ranking results.",
+    )
     return parser
 
 
@@ -321,6 +549,11 @@ def _read_launch_params():
     tmp.declare_parameter("close_threshold", 3)
     tmp.declare_parameter("radius", 4)
     tmp.declare_parameter("num_samples", 8)
+    tmp.declare_parameter("enable_nwm_ranking", False)
+    tmp.declare_parameter("nwm_ranking_timeout_sec", -1.0)
+    tmp.declare_parameter("image_topic", IMAGE_TOPIC)
+    tmp.declare_parameter("nwm_request_topic", NWM_RANKING_REQUEST_TOPIC)
+    tmp.declare_parameter("nwm_result_topic", NWM_RANKING_RESULT_TOPIC)
 
     args = argparse.Namespace(
         model=tmp.get_parameter("model").value,
@@ -330,6 +563,11 @@ def _read_launch_params():
         close_threshold=tmp.get_parameter("close_threshold").value,
         radius=tmp.get_parameter("radius").value,
         num_samples=tmp.get_parameter("num_samples").value,
+        enable_nwm_ranking=_as_bool(tmp.get_parameter("enable_nwm_ranking").value),
+        nwm_ranking_timeout_sec=float(tmp.get_parameter("nwm_ranking_timeout_sec").value),
+        image_topic=str(tmp.get_parameter("image_topic").value),
+        nwm_request_topic=str(tmp.get_parameter("nwm_request_topic").value),
+        nwm_result_topic=str(tmp.get_parameter("nwm_result_topic").value),
     )
     tmp.destroy_node()
     return args
@@ -356,7 +594,12 @@ def main(args=None):
             args = _read_launch_params()
 
     print(f"Args: model={args.model}, dir={args.dir}, "
-          f"goal_node={args.goal_node}, waypoint={args.waypoint}")
+          f"goal_node={args.goal_node}, waypoint={args.waypoint}, "
+          f"enable_nwm_ranking={args.enable_nwm_ranking}, "
+          f"nwm_ranking_timeout_sec={args.nwm_ranking_timeout_sec}, "
+          f"image_topic={args.image_topic}, "
+          f"nwm_request_topic={args.nwm_request_topic}, "
+          f"nwm_result_topic={args.nwm_result_topic}")
 
     # load model parameters
     with open(MODEL_CONFIG_PATH, "r") as f:
@@ -422,11 +665,14 @@ def main(args=None):
 
     # ROS2 — already initialized above
     node = NavigateNode(args)
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
 
