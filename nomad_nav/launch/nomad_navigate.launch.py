@@ -91,7 +91,7 @@ def generate_launch_description():
             description="Distance threshold for advancing to next topomap node"),
         DeclareLaunchArgument("radius", default_value="4",
             description="Number of topomap nodes to consider for localization"),
-        DeclareLaunchArgument("num_samples", default_value="8",
+        DeclareLaunchArgument("num_samples", default_value="6",
             description="Number of diffusion action samples"),
         DeclareLaunchArgument("image_topic", default_value="/camera/color/image_raw",
             description="Camera image topic"),

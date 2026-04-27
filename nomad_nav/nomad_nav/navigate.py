@@ -113,11 +113,10 @@ class NavigateNode(Node):
             "Registered with master node. Waiting for image observations..."
         )
 
-    def timer_callback(self):
-        global closest_node, reached_goal
-
-        # EXPLORATION MODE
+    def _compute_chosen_waypoint(self):
+        global closest_node
         chosen_waypoint = np.zeros(4)
+
         if len(context_queue) > model_params["context_size"]:
             if model_params["model_type"] == "nomad":
                 obs_images = transform_images(
@@ -235,6 +234,14 @@ class NavigateNode(Node):
                     ][self.args.waypoint]
                     closest_node = min(start + min_dist_idx + 1, goal_node)
 
+        return chosen_waypoint
+
+    def timer_callback(self):
+        global closest_node, reached_goal
+
+        # EXPLORATION MODE
+        chosen_waypoint = self._compute_chosen_waypoint()
+
         # RECOVERY MODE
         if model_params["normalize"]:
             chosen_waypoint[:2] *= MAX_V / RATE
@@ -302,9 +309,9 @@ def _build_arg_parser():
     parser.add_argument(
         "--num-samples",
         "-n",
-        default=8,
+        default=2,
         type=int,
-        help=f"Number of actions sampled from the exploration model (default: 8)",
+        help=f"Number of actions sampled from the exploration model (default: 6)",
     )
     return parser
 
@@ -318,7 +325,7 @@ def _read_launch_params():
     tmp.declare_parameter("goal_node", -1)
     tmp.declare_parameter("close_threshold", 3)
     tmp.declare_parameter("radius", 4)
-    tmp.declare_parameter("num_samples", 8)
+    tmp.declare_parameter("num_samples", 6)
 
     args = argparse.Namespace(
         model=tmp.get_parameter("model").value,

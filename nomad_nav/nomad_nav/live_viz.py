@@ -33,7 +33,7 @@ class LiveVizNode(Node):
         self.declare_parameter("sampled_actions_topic", "/sampled_actions")
         self.declare_parameter("waypoint_topic", "/waypoint")
         self.declare_parameter("goal_topic", "/topoplan/reached_goal")
-        self.declare_parameter("num_samples", 8)
+        self.declare_parameter("num_samples", 6)
         self.declare_parameter("window_name", "NoMaD Live View")
         self.declare_parameter("panel_size", 260)
         self.declare_parameter("meters_forward", 3.0)

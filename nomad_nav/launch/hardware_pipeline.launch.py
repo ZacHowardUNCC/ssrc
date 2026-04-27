@@ -56,6 +56,7 @@ def generate_launch_description():
         launch_arguments={
             'camera_namespace': '/',
             'camera_name': 'camera',
+            'enable_depth': 'false',
         }.items(),
     )
 
