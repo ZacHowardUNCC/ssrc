@@ -56,7 +56,18 @@ def generate_launch_description():
         launch_arguments={
             'camera_namespace': '/',
             'camera_name': 'camera',
+
             'enable_depth': 'false',
+            'enable_infra1': 'false',
+            'enable_infra2': 'false',
+            'enable_color': 'true',
+
+            'rgb_camera.profile': '424x240x15',
+            'depth_module.profile': '424x240x15',
+
+            'pointcloud.enable': 'false',
+            'enable_sync': 'false',
+            'align_depth.enable': 'false',
         }.items(),
     )
 

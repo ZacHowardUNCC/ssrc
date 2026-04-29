@@ -190,6 +190,10 @@ class NavigateNode(Node):
                     print("time elapsed:", time.time() - start_time)
 
                 naction = to_numpy(get_action(naction))
+
+                # Test code to stop cuda crash
+                torch.cuda.empty_cache()
+
                 sampled_actions_msg = Float32MultiArray()
                 sampled_actions_msg.data = np.concatenate(
                     (np.array([0]), naction.flatten())
@@ -245,6 +249,8 @@ class NavigateNode(Node):
         # RECOVERY MODE
         if model_params["normalize"]:
             chosen_waypoint[:2] *= MAX_V / RATE
+            metric_waypoint_spacing = (MAX_V / RATE) / 4
+            print(f"\n\nmetric waypoint spacing: {metric_waypoint_spacing}\n\n")
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = chosen_waypoint.tolist()
         self.waypoint_pub.publish(waypoint_msg)
@@ -301,7 +307,7 @@ def _build_arg_parser():
     parser.add_argument(
         "--radius",
         "-r",
-        default=4,
+        default=2,
         type=int,
         help="""temporal number of locobal nodes to look at in the topopmap for
         localization (default: 2)""",
